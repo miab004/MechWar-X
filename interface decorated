@@ -1,0 +1,743 @@
+#AI-assisted section: ChatGPT (initial Streamlit setup, GUI planning, tab layout skeleton)
+#AI-assisted section: Claude (Anthropic) (data layer, business-rule functions, validation, forms, buttons, styling)
+#Group: G13   Members: Norivette Vargas 6471001 and Mia Balda  (xxxxxx)
+#Confirm the exact model names above before submitting.
+#
+#NOTE: this version stores data in memory (Python lists inside st.session_state),
+#so it runs in a browser Streamlit with no database library. Procedures A, B and C
+#are the functions proc_a_book, proc_b_cancel and proc_c_report below.
+#The real relational schema (MySQL) is in the SQL submission.
+
+import math
+import random
+from datetime import datetime, date, time, timedelta
+
+import pandas as pd
+import streamlit as st
+
+st.set_page_config(
+    page_title="MechWar-X",
+    layout="wide",
+)
+
+# =====================================================================
+# DATA LAYER (sample data lives in session_state; resets on restart)
+# =====================================================================
+OPEN = ("Match Booked", "Active in Arena")
+FMT = "%Y-%m-%d %H:%M"
+
+
+def init_db():
+    if "db2" in st.session_state:
+        return
+    st.session_state["db2"] = {
+        "types": [
+            {"type_id": 1, "type_name": "Light Scout", "weight_class": "Light"},
+            {"type_id": 2, "type_name": "Assault Brawler", "weight_class": "Medium"},
+            {"type_id": 3, "type_name": "Heavy Artillery", "weight_class": "Heavy"},
+            {"type_id": 4, "type_name": "Juggernaut", "weight_class": "Super-Heavy"},
+        ],
+        "garages": [
+            {"garage_id": 1, "name": "Alpha Pit", "grid_address": "Grid A-12 / X45-Y12", "dispatch_phone": "555-0101"},
+            {"garage_id": 2, "name": "Delta Bay", "grid_address": "Grid D-03 / X88-Y40", "dispatch_phone": "555-0102"},
+        ],
+        "staff": [
+            {"staff_id": 1, "garage_id": 1, "full_name": "Rex Calder", "phone": "555-0111", "email": "rex@league.test", "role": "Chief"},
+            {"staff_id": 2, "garage_id": 1, "full_name": "Mina Ortiz", "phone": "555-0112", "email": "mina@league.test", "role": "Technician"},
+            {"staff_id": 3, "garage_id": 2, "full_name": "Jun Park", "phone": "555-0121", "email": "jun@league.test", "role": "Chief"},
+            {"staff_id": 4, "garage_id": 2, "full_name": "Tia Brooks", "phone": "555-0122", "email": "tia@league.test", "role": "Technician"},
+        ],
+        "mechs": [
+            {"mech_id": 1, "chassis_serial": "CH-0001", "make": "Titanforge", "model": "TF-Scout 1", "assembly_year": 2041, "paint_color": "Crimson", "daily_rate": 500.0, "combat_hours": 0.0, "status": "Available", "type_id": 1, "garage_id": 1},
+            {"mech_id": 2, "chassis_serial": "CH-0002", "make": "Titanforge", "model": "TF-Brawl 7", "assembly_year": 2042, "paint_color": "Black", "daily_rate": 900.0, "combat_hours": 0.0, "status": "Available", "type_id": 2, "garage_id": 1},
+            {"mech_id": 3, "chassis_serial": "CH-0003", "make": "Ironclad", "model": "IC-Siege 3", "assembly_year": 2040, "paint_color": "Gunmetal", "daily_rate": 1400.0, "combat_hours": 0.0, "status": "Available", "type_id": 3, "garage_id": 2},
+            {"mech_id": 4, "chassis_serial": "CH-0004", "make": "Ironclad", "model": "IC-Jugg X", "assembly_year": 2043, "paint_color": "White", "daily_rate": 2200.0, "combat_hours": 0.0, "status": "Available", "type_id": 4, "garage_id": 2},
+        ],
+        "clients": [
+            {"client_id": 1, "first_name": "Nori", "last_name": "Vargas", "address": "12 Orbit Way", "phone": "555-0201", "email": "nori@mechwar.test", "license_token": "LIC-AAA-111", "license_expiry": date(2030, 12, 31)},
+            {"client_id": 2, "first_name": "Mia", "last_name": "Balda", "address": "90 Nova St", "phone": "555-0202", "email": "mia@mechwar.test", "license_token": "LIC-BBB-222", "license_expiry": date(2031, 6, 30)},
+            {"client_id": 3, "first_name": "Catluver", "last_name": "Sponsor", "address": "5 Ember Ave", "phone": "555-0203", "email": "cat@mechwar.test", "license_token": "LIC-CCC-333", "license_expiry": date(2031, 3, 15)},
+        ],
+        "manifests": [],
+        "logs": [],
+        "next": {"mech": 5, "manifest": 1, "log": 1},
+    }
+
+
+init_db()
+DB = st.session_state["db2"]
+for _c in DB["clients"]:
+    _c.setdefault("last_name", "")
+
+
+def find(table, key, value):
+    for row in DB[table]:
+        if row[key] == value:
+            return row
+    return None
+
+
+def fmt(dt):
+    return dt.strftime(FMT) if dt else ""
+
+
+# =====================================================================
+# BUSINESS RULES ("stored procedures")
+# =====================================================================
+def refresh_status(mech_id):
+    """Recompute a mech's status: open Critical log > live booking > free."""
+    m = find("mechs", "mech_id", mech_id)
+    if any(l["mech_id"] == mech_id and l["issue_type"] == "Critical"
+           and l["status"] != "Repaired" for l in DB["logs"]):
+        m["status"] = "Unavailable"
+    elif any(x["mech_id"] == mech_id and x["status"] in OPEN
+             for x in DB["manifests"]):
+        m["status"] = "Reserved"
+    else:
+        m["status"] = "Available"
+
+
+def find_conflicts(mech_id, start, end):
+    return [x for x in DB["manifests"]
+            if x["mech_id"] == mech_id and x["status"] in OPEN
+            and start < x["scheduled_end"] and end > x["scheduled_start"]]
+
+
+def proc_a_book(client_id, mech_id, garage_id, start, end):
+    """PROCEDURE A: double-booking overlap prevention. Raises ValueError."""
+    if end <= start:
+        raise ValueError("Return date/time must be after the deployment time.")
+    if start < datetime.now():
+        raise ValueError("Deployment window cannot start in the past.")
+    mech = find("mechs", "mech_id", mech_id)
+    client = find("clients", "client_id", client_id)
+    if mech is None or client is None:
+        raise ValueError("Mech or client does not exist.")
+    if mech["status"] == "Unavailable":
+        raise ValueError("Mech is Unavailable (critical failure under repair).")
+    if client["license_expiry"] < end.date():
+        raise ValueError("Pilot combat license expires before the end of the window.")
+    clash = find_conflicts(mech_id, start, end)
+    if clash:
+        raise ValueError("Conflict: mech is already reserved during that window "
+                         f"(manifest #{clash[0]['serial_id']}).")
+    hours = (end - start).total_seconds() / 3600
+    cost = max(1, math.ceil(hours / 24)) * mech["daily_rate"]
+    sid = DB["next"]["manifest"]
+    DB["next"]["manifest"] += 1
+    DB["manifests"].append({
+        "serial_id": sid, "client_id": client_id, "mech_id": mech_id,
+        "pickup_garage_id": garage_id, "return_garage_id": None,
+        "scheduled_start": start, "scheduled_end": end,
+        "actual_start": None, "actual_end": None,
+        "estimated_cost": cost, "actual_cost": None, "status": "Match Booked"})
+    refresh_status(mech_id)
+    return sid, cost
+
+
+def proc_b_cancel(serial_id):
+    """PROCEDURE B: cancelling a manifest automatically re-syncs the mech."""
+    x = find("manifests", "serial_id", serial_id)
+    if x is None or x["status"] not in OPEN:
+        raise ValueError("Manifest not found or already Completed/Cancelled.")
+    x["status"] = "Cancelled"
+    refresh_status(x["mech_id"])
+
+
+def proc_c_report(mech_id, client_id, issue_type, desc, chief_id):
+    """PROCEDURE C: a Critical log locks the mech as Unavailable."""
+    if not desc.strip():
+        raise ValueError("Damage description must not be blank.")
+    lid = DB["next"]["log"]
+    DB["next"]["log"] += 1
+    DB["logs"].append({
+        "log_id": lid, "mech_id": mech_id, "client_id": client_id,
+        "report_ts": datetime.now(), "issue_type": issue_type,
+        "description": desc.strip(), "status": "Reported",
+        "resolution_ts": None, "chief_staff_id": chief_id,
+        "engineering_notes": ""})
+    if issue_type == "Critical":
+        find("mechs", "mech_id", mech_id)["status"] = "Unavailable"
+    return lid
+
+
+# =====================================================================
+# UI HELPERS
+# =====================================================================
+ICON = {
+    "Available": "🟢 Available", "Reserved": "🟡 Reserved",
+    "Unavailable": "🔴 Unavailable", "Match Booked": "📅 Match Booked",
+    "Active in Arena": "⚔️ Active in Arena", "Completed": "✅ Completed",
+    "Cancelled": "❌ Cancelled", "Reported": "🟠 Reported",
+    "In-Progress": "🔧 In-Progress", "Awaiting Parts": "⏳ Awaiting Parts",
+    "Repaired": "✅ Repaired", "Critical": "🚨 Critical", "Routine": "🛠️ Routine",
+}
+MONEY = st.column_config.NumberColumn(format="$%.2f")
+
+
+def notify(slot, kind, text):
+    st.session_state["msg_" + slot] = (kind, text)
+
+
+def show_msg(slot):
+    m = st.session_state.pop("msg_" + slot, None)
+    if m:
+        getattr(st, m[0])(m[1])
+
+
+def table(df):
+    st.dataframe(df, hide_index=True,
+                 column_config={"estimated_cost": MONEY, "actual_cost": MONEY,
+                                "daily_rate": MONEY})
+
+
+def options(rows, id_col, label_fn):
+    return [r[id_col] for r in rows], {r[id_col]: label_fn(r) for r in rows}
+
+
+def manifest_frame(rows):
+    out = []
+    for x in rows:
+        m = find("mechs", "mech_id", x["mech_id"])
+        gp = find("garages", "garage_id", x["pickup_garage_id"])
+        gr = find("garages", "garage_id", x["return_garage_id"])
+        out.append({
+            "serial_id": x["serial_id"], "client_id": x["client_id"],
+            "chassis_serial": m["chassis_serial"], "model": m["model"],
+            "scheduled_start": fmt(x["scheduled_start"]),
+            "scheduled_end": fmt(x["scheduled_end"]),
+            "actual_start": fmt(x["actual_start"]),
+            "actual_end": fmt(x["actual_end"]),
+            "estimated_cost": x["estimated_cost"],
+            "actual_cost": x["actual_cost"],
+            "status": ICON[x["status"]],
+            "pickup_garage": gp["name"],
+            "return_garage": gr["name"] if gr else ""})
+    return pd.DataFrame(out)
+
+
+def log_frame(rows):
+    out = []
+    for l in rows:
+        m = find("mechs", "mech_id", l["mech_id"])
+        s = find("staff", "staff_id", l["chief_staff_id"])
+        out.append({
+            "log_id": l["log_id"], "mech_id": l["mech_id"],
+            "chassis_serial": m["chassis_serial"],
+            "issue_type": ICON[l["issue_type"]], "status": ICON[l["status"]],
+            "reported": fmt(l["report_ts"]), "description": l["description"],
+            "chief": s["full_name"] if s else "",
+            "resolved": fmt(l["resolution_ts"]),
+            "engineering_notes": l["engineering_notes"]})
+    return pd.DataFrame(out)
+
+
+def fleet_cards(cols=4):
+    mechs = DB["mechs"]
+    for i in range(0, len(mechs), cols):
+        row = st.columns(cols)
+        for j, m in enumerate(mechs[i:i + cols]):
+            with row[j].container(border=True):
+                st.markdown(f"**{m['model']}**")
+                st.caption(f"ID {m['mech_id']} · {m['chassis_serial']}")
+                st.markdown(ICON[m["status"]])
+                st.caption(f"{m['combat_hours']:.1f} combat hrs")
+
+
+# =====================================================================
+# BUTTON CALLBACKS (run before the page redraws, so every table is fresh)
+# =====================================================================
+REG_KEYS = ("r_serial", "r_make", "r_model", "r_color", "r_year", "r_rate")
+
+
+def cb_fill_example():
+    st.session_state.update(
+        r_serial=f"CH-{random.randint(1000, 9999)}", r_make="Titanforge",
+        r_model="TF-Ranger 9", r_color="Neon Blue", r_year="2044",
+        r_rate="750")
+
+
+def cb_clear_form():
+    for k in REG_KEYS:
+        st.session_state[k] = ""
+
+
+def cb_register():
+    s = st.session_state
+    errors = []
+    required = {"Chassis serial": "r_serial", "Make": "r_make", "Model": "r_model", "Paint color": "r_color"}
+    for label, key in required.items():
+        if not s.get(key, "").strip():
+            errors.append(f"{label} must not be blank.")
+    year = None
+    try:
+        year = int(s.get("r_year", "").strip())
+        if year <= 0:
+            errors.append("Assembly year must be a positive number.")
+    except ValueError:
+        errors.append("Assembly year must be a whole number.")
+    rate = None
+    try:
+        rate = float(s.get("r_rate", "").strip())
+        if rate <= 0:
+            errors.append("Daily rate must be greater than zero.")
+    except ValueError:
+        errors.append("Daily rate must be a number.")
+    serial = s.get("r_serial", "").strip()
+    if serial and any(m["chassis_serial"].lower() == serial.lower()
+                      for m in DB["mechs"]):
+        errors.append(f"Chassis serial '{serial}' is already registered.")
+    if errors:
+        notify("reg", "error", "\n\n".join(errors))
+        return
+    mid = DB["next"]["mech"]
+    DB["next"]["mech"] += 1
+    DB["mechs"].append({
+        "mech_id": mid, "chassis_serial": serial,
+        "make": s["r_make"].strip(), "model": s["r_model"].strip(),
+        "assembly_year": year, "paint_color": s["r_color"].strip(),
+        "daily_rate": rate, "combat_hours": 0.0, "status": "Available",
+        "type_id": s["r_type"], "garage_id": s["r_garage"]})
+    cb_clear_form()
+    notify("reg", "success", f"Mech registered with Mech ID {mid}.")
+
+
+def cb_pick_client(cid):
+    st.session_state["s_cid"] = str(cid)
+
+
+def cb_search():
+    txt = st.session_state.get("s_cid", "").strip()
+    st.session_state.pop("s_active", None)
+    if not txt:
+        notify("search", "error", "Please enter a Client ID.")
+    elif not txt.isdigit():
+        notify("search", "error", "Client ID must be a whole number.")
+    else:
+        st.session_state["s_active"] = int(txt)
+
+
+def booking_window():
+    s = st.session_state
+    return (datetime.combine(s["b_sd"], s["b_st"]),
+            datetime.combine(s["b_ed"], s["b_et"]))
+
+
+def cb_check():
+    s = st.session_state
+    start, end = booking_window()
+    if end <= start:
+        notify("book", "error", "Return must be after deployment.")
+        return
+    mech = find("mechs", "mech_id", s["b_mech"])
+    clash = find_conflicts(s["b_mech"], start, end)
+    if mech["status"] == "Unavailable":
+        notify("book", "error", "🔴 Mech is Unavailable (critical failure).")
+    elif clash:
+        notify("book", "error", "🔴 Conflict with manifest(s): "
+               + ", ".join(f"#{x['serial_id']}" for x in clash))
+    else:
+        notify("book", "success", "🟢 Mech is free for this window.")
+
+
+def cb_book():
+    s = st.session_state
+    start, end = booking_window()
+    try:
+        sid, cost = proc_a_book(s["b_client"], s["b_mech"], s["b_garage"],
+                                start, end)
+        notify("book", "success",
+               f"Manifest #{sid} booked. Estimated cost: ${cost:,.2f}")
+    except ValueError as e:
+        notify("book", "error", f"🚫 Booking rejected: {e}")
+
+
+def cb_cancel():
+    s = st.session_state
+    if not s.get("cx_confirm"):
+        notify("cancel", "warning", "Tick the confirmation box first.")
+        return
+    try:
+        proc_b_cancel(s["cx"])
+        s["cx_confirm"] = False
+        notify("cancel", "success", f"Manifest #{s['cx']} cancelled. The mech "
+               "status was re-synchronised automatically.")
+    except ValueError as e:
+        notify("cancel", "error", str(e))
+
+
+def cb_complete():
+    s = st.session_state
+    start = datetime.combine(s["asd"], s["ast"])
+    end = datetime.combine(s["aed"], s["aet"])
+    if end <= start:
+        notify("complete", "error", "Actual return must be after actual start.")
+        return
+    x = find("manifests", "serial_id", s["cp"])
+    if x is None or x["status"] not in OPEN:
+        notify("complete", "error", "Manifest not found or not open.")
+        return
+    m = find("mechs", "mech_id", x["mech_id"])
+    hrs = (end - start).total_seconds() / 3600
+    x.update(actual_start=start, actual_end=end, status="Completed",
+             return_garage_id=s["rg"],
+             actual_cost=max(1, math.ceil(hrs / 24)) * m["daily_rate"])
+    m["combat_hours"] += hrs
+    refresh_status(m["mech_id"])
+    notify("complete", "success", f"Manifest #{x['serial_id']} completed. "
+           f"Combat hours added: {hrs:.2f}. Final cost: ${x['actual_cost']:,.2f}")
+
+
+def cb_report():
+    s = st.session_state
+    try:
+        proc_c_report(s["i_mech"], s["i_client"], s["i_type"], s["i_desc"],
+                      s["i_chief"])
+        s["i_desc"] = ""
+        if s["i_type"] == "Critical":
+            notify("inc", "success", "Critical failure logged. The mech was "
+                   "locked as Unavailable automatically.")
+        else:
+            notify("inc", "success", "Routine servicing request logged.")
+    except ValueError as e:
+        notify("inc", "error", str(e))
+
+
+def cb_progress():
+    s = st.session_state
+    log = find("logs", "log_id", s["pid"])
+    if log is None:
+        return
+    log["status"] = s["pstat"]
+    notify("res", "success", f"Log #{log['log_id']} set to {s['pstat']}.")
+
+
+def cb_resolve():
+    s = st.session_state
+    log = find("logs", "log_id", s["pid"])
+    if log is None or log["status"] == "Repaired":
+        notify("res", "error", "Log not found or already Repaired.")
+        return
+    log["status"] = "Repaired"
+    log["resolution_ts"] = datetime.now()
+    log["engineering_notes"] = s.get("r_notes", "").strip()
+    refresh_status(log["mech_id"])
+    notify("res", "success", f"Log #{log['log_id']} resolved. The mech status "
+           "was re-evaluated.")
+
+
+def cb_reset():
+    st.session_state.clear()
+
+
+# =====================================================================
+# PAGE HEADER, METRICS, SIDEBAR
+# =====================================================================
+st.markdown("""
+<style>
+.hero{background:linear-gradient(90deg,#0f172a,#1e3a8a 60%,#7c3aed);
+      padding:1.1rem 1.5rem;border-radius:14px;margin-bottom:.8rem}
+.hero .t{color:#fff;font-size:2rem;font-weight:800;margin:0;line-height:1.2}
+.hero .s{color:#cbd5e1;margin:.2rem 0 0 0}
+</style>
+<div class="hero"><p class="t">🤖 MechWar-X</p>
+<p class="s">Robo-Rental Management System · Neo-Prime Gladiatorial League</p></div>
+""", unsafe_allow_html=True)
+
+mm = DB["mechs"]
+m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1.metric("Fleet size", len(mm))
+m2.metric("🟢 Available", sum(m["status"] == "Available" for m in mm))
+m3.metric("🟡 Reserved", sum(m["status"] == "Reserved" for m in mm))
+m4.metric("🔴 Unavailable", sum(m["status"] == "Unavailable" for m in mm))
+m5.metric("Open manifests", sum(x["status"] in OPEN for x in DB["manifests"]))
+m6.metric("Open incidents", sum(l["status"] != "Repaired" for l in DB["logs"]))
+
+with st.sidebar:
+    st.header("Control panel")
+    st.caption("Data is kept in memory and resets when the app restarts.")
+    st.button("♻️ Reset demo data", on_click=cb_reset, use_container_width=True)
+    with st.expander("Rules enforced by the backend"):
+        st.markdown(
+            "**A. Overlap prevention:** a mech cannot be booked twice in the "
+            "same window.\n\n**B. Cancellation sync:** cancelling a manifest "
+            "frees the mech automatically.\n\n**C. Emergency lock:** a "
+            "Critical incident makes the mech Unavailable until repaired.")
+    with st.expander("Demo checklist"):
+        st.markdown(
+            "1. Register a mech: bad year, duplicate serial, valid entry\n"
+            "2. Search Client ID 1\n"
+            "3. Book mech 1, then try to double-book it\n"
+            "4. Cancel the booking and watch mech 1 turn green\n"
+            "5. File a Critical incident on mech 2 and try to book it\n"
+            "6. Resolve the incident")
+
+tab1, tab2, tab3, tab4 = st.tabs(["Mech Registration", "Client Dashboard",
+                                  "Rental Scheduling", "Maintenance"])
+
+# =====================================================================
+# SCREEN 1: Mech Registration
+# =====================================================================
+with tab1:
+    st.header("Mech Registration")
+    st.write("Register new combat mechs here.")
+    t_ids, t_lab = options(DB["types"], "type_id",
+                           lambda r: f"{r['type_name']} ({r['weight_class']})")
+    g_ids, g_lab = options(DB["garages"], "garage_id", lambda r: r["name"])
+
+    left, right = st.columns([2, 1])
+    with right:
+        with st.container(border=True):
+            st.markdown("**⚡ Quick actions**")
+            st.button("Auto-fill example", on_click=cb_fill_example,
+                      use_container_width=True)
+            st.button("Clear form", on_click=cb_clear_form,
+                      use_container_width=True)
+        with st.container(border=True):
+            st.markdown("**✔ Validation rules**")
+            st.markdown("- All fields are mandatory\n"
+                        "- Chassis serial must be unique\n"
+                        "- Assembly year: positive whole number\n"
+                        "- Daily rate: number greater than 0")
+    with left:
+        with st.container(border=True):
+            c1, c2 = st.columns(2)
+            c1.text_input("Chassis registration serial *", key="r_serial")
+            c2.text_input("Make (manufacturer) *", key="r_make")
+            c1.text_input("Model *", key="r_model")
+            c2.text_input("Armor paint color *", key="r_color")
+            c1.text_input("Assembly year *", key="r_year")
+            c2.text_input("Baseline daily deployment rate *", key="r_rate")
+            c1.selectbox("Mech type *", t_ids, format_func=t_lab.get,
+                         key="r_type")
+            c2.selectbox("Home battle garage *", g_ids, format_func=g_lab.get,
+                         key="r_garage")
+            st.button("➕ Register mech", type="primary", on_click=cb_register)
+            show_msg("reg")
+
+    st.subheader("Current fleet")
+    rows = []
+    for m in DB["mechs"]:
+        t = find("types", "type_id", m["type_id"])
+        g = find("garages", "garage_id", m["garage_id"])
+        rows.append({
+            "mech_id": m["mech_id"], "chassis_serial": m["chassis_serial"],
+            "make": m["make"], "model": m["model"],
+            "assembly_year": m["assembly_year"],
+            "paint_color": m["paint_color"], "daily_rate": m["daily_rate"],
+            "combat_hours": round(m["combat_hours"], 2),
+            "status": ICON[m["status"]], "type_name": t["type_name"],
+            "garage": g["name"]})
+    table(pd.DataFrame(rows))
+
+# =====================================================================
+# SCREEN 2: Client Dashboard
+# =====================================================================
+with tab2:
+    st.header("Client Dashboard")
+    st.write("View, search, and manage client information and records here.")
+    with st.container(border=True):
+        a, b = st.columns([1, 2])
+        a.text_input("Client ID", key="s_cid", placeholder="e.g. 1")
+        with b:
+            st.caption("Quick pick")
+            qp = st.columns(len(DB["clients"]))
+            for n, c in enumerate(DB["clients"]):
+                qp[n].button(f"{c['client_id']} · {c['first_name']}",
+                             key=f"qp{c['client_id']}",
+                             on_click=cb_pick_client, args=(c["client_id"],),
+                             use_container_width=True)
+        scope = st.radio("Show", ["All", "Ongoing (booked / active)",
+                                  "Historical (completed / cancelled)"],
+                         horizontal=True, key="s_scope")
+        st.button("🔍 Search manifests", type="primary", on_click=cb_search)
+        show_msg("search")
+
+    if "s_active" in st.session_state:
+        cid = st.session_state["s_active"]
+        c = find("clients", "client_id", cid)
+        if c is None:
+            st.warning(f"No client found with ID {cid}.")
+        else:
+            with st.container(border=True):
+                st.markdown(f"### {c['first_name']} {c['last_name']}")
+                st.caption(f"{c['email']} · {c['phone']} · pilot license "
+                           f"expires {c['license_expiry']}")
+            rows = [x for x in DB["manifests"] if x["client_id"] == cid]
+            if scope.startswith("Ongoing"):
+                rows = [x for x in rows if x["status"] in OPEN]
+            elif scope.startswith("Historical"):
+                rows = [x for x in rows
+                        if x["status"] in ("Completed", "Cancelled")]
+            rows.sort(key=lambda x: x["scheduled_start"], reverse=True)
+            if not rows:
+                st.warning("This client has no matching manifests.")
+            else:
+                x1, x2, x3 = st.columns(3)
+                x1.metric("Manifests", len(rows))
+                x2.metric("Estimated total",
+                          f"${sum(x['estimated_cost'] for x in rows):,.2f}")
+                x3.metric("Final cost total", "${:,.2f}".format(
+                    sum(x["actual_cost"] or 0 for x in rows)))
+                table(manifest_frame(rows))
+
+# =====================================================================
+# SCREEN 3: Rental Scheduling
+# =====================================================================
+with tab3:
+    st.header("Rental Scheduling")
+    st.write("Schedule and manage mech rentals here.")
+    c_ids, c_lab = options(DB["clients"], "client_id",
+                           lambda r: f"{r['client_id']} - {r['first_name']} {r['last_name']}")
+    m_ids, m_lab = options(DB["mechs"], "mech_id",
+                           lambda r: f"{r['mech_id']} - {r['chassis_serial']} {r['model']} [{r['status']}]")
+    g_ids, g_lab = options(DB["garages"], "garage_id", lambda r: r["name"])
+
+    st.subheader("Mech availability")
+    fleet_cards()
+
+    tomorrow = date.today() + timedelta(days=1)
+    with st.container(border=True):
+        st.subheader("📝 New deployment manifest")
+        c1, c2, c3 = st.columns(3)
+        c1.selectbox("Client / pilot", c_ids, format_func=c_lab.get,
+                     key="b_client")
+        c2.selectbox("Mech", m_ids, format_func=m_lab.get, key="b_mech")
+        c3.selectbox("Pickup garage", g_ids, format_func=g_lab.get,
+                     key="b_garage")
+        d1, t1, d2, t2 = st.columns(4)
+        d1.date_input("Deployment date", value=tomorrow, key="b_sd")
+        t1.time_input("Deployment time", value=time(9, 0), key="b_st")
+        d2.date_input("Hangar return date", value=tomorrow + timedelta(days=2),
+                      key="b_ed")
+        t2.time_input("Hangar return time", value=time(18, 0), key="b_et")
+
+        start, end = booking_window()
+        if end <= start:
+            st.warning("Return must be after deployment.")
+        else:
+            hours = (end - start).total_seconds() / 3600
+            days = max(1, math.ceil(hours / 24))
+            rate = find("mechs", "mech_id", st.session_state["b_mech"])["daily_rate"]
+            st.info(f"Window: **{hours:.1f} hours** ({days} billable day(s)) "
+                    f"· Estimated cost: **${days * rate:,.2f}**")
+        b1, b2 = st.columns(2)
+        b1.button("🔎 Check availability", on_click=cb_check,
+                  use_container_width=True)
+        b2.button("✅ Book mech", type="primary", on_click=cb_book,
+                  use_container_width=True)
+        show_msg("book")
+
+    st.subheader("Open manifests")
+    open_m = sorted([x for x in DB["manifests"] if x["status"] in OPEN],
+                    key=lambda x: x["scheduled_start"])
+    if not open_m:
+        st.info("No open manifests. Book a mech above.")
+    else:
+        table(manifest_frame(open_m))
+        ids, lab = options(open_m, "serial_id",
+                           lambda r: f"#{r['serial_id']} · mech {r['mech_id']} · "
+                                     f"{fmt(r['scheduled_start'])} → {fmt(r['scheduled_end'])}")
+        col_a, col_b = st.columns(2)
+        with col_a.container(border=True):
+            st.markdown("**❌ Cancel a manifest**")
+            st.selectbox("Manifest", ids, format_func=lab.get, key="cx")
+            st.checkbox("I confirm this cancellation", key="cx_confirm")
+            st.button("Cancel manifest", on_click=cb_cancel,
+                      use_container_width=True)
+            show_msg("cancel")
+        with col_b.container(border=True):
+            st.markdown("**✅ Complete a manifest**")
+            st.selectbox("Manifest", ids, format_func=lab.get, key="cp")
+            st.selectbox("Return garage", g_ids, format_func=g_lab.get,
+                         key="rg")
+            x1, x2, x3, x4 = st.columns(4)
+            x1.date_input("Start date", key="asd")
+            x2.time_input("Start time", value=time(9, 0), key="ast")
+            x3.date_input("Return date", key="aed")
+            x4.time_input("Return time", value=time(17, 0), key="aet")
+            st.button("Mark completed", on_click=cb_complete,
+                      use_container_width=True)
+            show_msg("complete")
+    show_msg("cancel")
+    show_msg("complete")
+
+# =====================================================================
+# SCREEN 4: Maintenance
+# =====================================================================
+with tab4:
+    st.header("Maintenance")
+    st.write("Manage and track mech maintenance schedules and records here.")
+    m_ids, m_lab = options(DB["mechs"], "mech_id",
+                           lambda r: f"{r['mech_id']} - {r['chassis_serial']} {r['model']} [{r['status']}]")
+    c_ids, c_lab = options(DB["clients"], "client_id",
+                           lambda r: f"{r['client_id']} - {r['first_name']} {r['last_name']}")
+    c_ids = [None] + c_ids
+    c_lab[None] = "Hull telemetry (automatic)"
+    chiefs = [s for s in DB["staff"] if s["role"] == "Chief"]
+    s_ids, s_lab = options(chiefs, "staff_id", lambda r: r["full_name"])
+    s_ids = [None] + s_ids
+    s_lab[None] = "Unassigned"
+
+    st.subheader("Fleet status")
+    fleet_cards()
+
+    left, right = st.columns(2)
+    with left.container(border=True):
+        st.markdown("### 🚨 File a new damage incident")
+        st.selectbox("Mech", m_ids, format_func=m_lab.get, key="i_mech")
+        st.selectbox("Reported by", c_ids, format_func=c_lab.get,
+                     key="i_client")
+        i_type = st.radio("Issue type", ["Routine", "Critical"],
+                          horizontal=True, key="i_type")
+        if i_type == "Critical":
+            st.error("🚨 Critical failure: the mech will be locked as "
+                     "Unavailable immediately (Procedure C).")
+        else:
+            st.info("🛠️ Routine servicing: booked in low-demand windows. "
+                    "Mech status does not change.")
+        st.selectbox("Assigned pit-crew chief", s_ids, format_func=s_lab.get,
+                     key="i_chief")
+        st.text_area("Damage description *", key="i_desc",
+                     placeholder="e.g. Reactor core instability")
+        st.button("File incident", type="primary", on_click=cb_report,
+                  use_container_width=True)
+        show_msg("inc")
+
+    active = [l for l in DB["logs"] if l["status"] != "Repaired"]
+    with right.container(border=True):
+        st.markdown("### 🔧 Active maintenance logs")
+        if not active:
+            st.info("No active incidents. All systems nominal.")
+        else:
+            table(log_frame(active))
+            log_ids, log_lab = options(
+                active, "log_id",
+                lambda r: f"#{r['log_id']} · mech {r['mech_id']} · {r['issue_type']} · {r['status']}")
+            st.selectbox("Log", log_ids, format_func=log_lab.get, key="pid")
+            pc1, pc2 = st.columns(2)
+            pc1.selectbox("New status", ["In-Progress", "Awaiting Parts"],
+                          key="pstat")
+            pc2.write("")
+            pc2.button("Update status", on_click=cb_progress,
+                       use_container_width=True)
+            st.text_area("Engineering notes", key="r_notes")
+            st.button("✅ Mark repaired (resolve)", type="primary",
+                      on_click=cb_resolve, use_container_width=True)
+        show_msg("res")
+
+    with st.expander("📞 Garage crew contacts (urgent failures)"):
+        crew = []
+        for s in DB["staff"]:
+            g = find("garages", "garage_id", s["garage_id"])
+            crew.append({"garage": g["name"], "dispatch_phone": g["dispatch_phone"],
+                         "name": s["full_name"], "role": s["role"],
+                         "phone": s["phone"], "email": s["email"]})
+        st.dataframe(pd.DataFrame(crew), hide_index=True)
+
+    with st.expander("📜 Resolved incident history"):
+        done = [l for l in DB["logs"] if l["status"] == "Repaired"]
+        if not done:
+            st.caption("Nothing resolved yet.")
+        else:
+            table(log_frame(done))
