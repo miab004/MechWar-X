@@ -1,12 +1,6 @@
 #AI-assisted section: ChatGPT (initial Streamlit setup, GUI planning, tab layout skeleton)
-#AI-assisted section: Claude (Anthropic) (data layer, business-rule functions, validation, forms, buttons, styling)
+#AI-assisted section: Claude (Anthropic) (data layer,validation, forms, buttons, styling)
 #Group: G13   Members: Norivette Vargas 6471001 and Mia Balda  (xxxxxx)
-#Confirm the exact model names above before submitting.
-#
-#NOTE: this version stores data in memory (Python lists inside st.session_state),
-#so it runs in a browser Streamlit with no database library. Procedures A, B and C
-#are the functions proc_a_book, proc_b_cancel and proc_c_report below.
-#The real relational schema (MySQL) is in the SQL submission.
 
 import math
 import random
